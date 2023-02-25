@@ -27,6 +27,19 @@ pub fn load(paths: &[impl AsRef<Path>]) -> Result<RawAssets> {
     Ok(raw_assets)
 }
 
+/// Await a future on the current thread.
+#[cfg(not(target_arch = "wasm32"))]
+fn block_on<F>(f: F) -> F::Output
+where
+    F: std::future::Future,
+{
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(f)
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn load_single(paths: &[impl AsRef<Path>]) -> Result<RawAssets> {
     let mut data_urls = HashSet::new();
@@ -39,8 +52,8 @@ fn load_single(paths: &[impl AsRef<Path>]) -> Result<RawAssets> {
             local_paths.insert(path);
         }
     }
-    let mut raw_assets = RawAssets::new();
-    load_from_disk(local_paths, &mut raw_assets)?;
+
+    let mut raw_assets = block_on(load_async_single(paths))?;
     parse_data_urls(data_urls, &mut raw_assets)?;
     Ok(raw_assets)
 }
@@ -103,28 +116,40 @@ async fn load_async_single(paths: &[impl AsRef<Path>]) -> Result<RawAssets> {
 
     let mut raw_assets = RawAssets::new();
     load_urls(urls, &mut raw_assets).await?;
-    load_from_disk(local_paths, &mut raw_assets)?;
+    load_from_disk(local_paths, &mut raw_assets).await?;
     parse_data_urls(data_urls, &mut raw_assets)?;
     Ok(raw_assets)
 }
 
+/// Load assets from disk.
 #[cfg(not(target_arch = "wasm32"))]
-fn load_from_disk(paths: HashSet<PathBuf>, raw_assets: &mut RawAssets) -> Result<()> {
-    let mut handles = Vec::new();
+async fn load_from_disk<Ps>(paths: Ps, raw_assets: &mut RawAssets) -> Result<()>
+where
+    Ps: IntoIterator<Item = PathBuf>,
+{
+    let mut tasks = tokio::task::JoinSet::new();
+
     for path in paths {
-        handles.push((
-            path.clone(),
-            std::thread::spawn(move || std::fs::read(path)),
-        ));
+        tasks.spawn(async move {
+            let bytes = tokio::fs::read(&path)
+                .await
+                .map_err(|e| Error::FailedLoading(path.to_string_lossy().into(), e))?;
+
+            Ok((path, bytes))
+        });
     }
 
-    for (path, handle) in handles.drain(..) {
-        let bytes = handle
-            .join()
-            .unwrap()
-            .map_err(|e| Error::FailedLoading(path.to_str().unwrap().to_string(), e))?;
-        raw_assets.insert(path, bytes);
+    // Iterate over the `res`ults of the tasks as they complete
+    while let Some(Ok(res)) = tasks.join_next().await {
+        // We don't care about Some(Err(e)) as this only happens if the join
+        // fails which can only happen if a task panics but that can't happpen
+        // because the task code in the above for loop can't panic.
+        match res {
+            Ok((path, bytes)) => raw_assets.insert(path, bytes),
+            Err(e) => return Err(e),
+        };
     }
+
     Ok(())
 }
 
