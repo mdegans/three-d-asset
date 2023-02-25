@@ -42,20 +42,7 @@ where
 
 #[cfg(not(target_arch = "wasm32"))]
 fn load_single(paths: &[impl AsRef<Path>]) -> Result<RawAssets> {
-    let mut data_urls = HashSet::new();
-    let mut local_paths = HashSet::new();
-    for path in paths.iter() {
-        let path = path.as_ref().to_path_buf();
-        if is_data_url(&path) {
-            data_urls.insert(path);
-        } else {
-            local_paths.insert(path);
-        }
-    }
-
-    let mut raw_assets = block_on(load_async_single(paths))?;
-    parse_data_urls(data_urls, &mut raw_assets)?;
-    Ok(raw_assets)
+    Ok(block_on(load_async_single(paths))?)
 }
 
 ///
