@@ -102,18 +102,28 @@ async fn load_async_single(paths: &[impl AsRef<Path>]) -> Result<RawAssets> {
     }
 
     let mut raw_assets = RawAssets::new();
-    load_urls(urls, &mut raw_assets).await?;
-    load_from_disk(local_paths, &mut raw_assets).await?;
+    // load from network and disk in parallel, returning on the first error
+    match tokio::try_join!(load_urls(urls), load_from_disk(local_paths)) {
+        Ok((urls_assets, disk_assets)) => {
+            raw_assets.extend(urls_assets);
+            raw_assets.extend(disk_assets);
+        }
+        Err(e) => return Err(e),
+    }
+    // This function is cpu bound and does not need to be async fn, however it's
+    // non-trivial if the n of data_urls is large, it may make sense to process
+    // them in parallel in the future.
     parse_data_urls(data_urls, &mut raw_assets)?;
     Ok(raw_assets)
 }
 
 /// Load assets from disk.
 #[cfg(not(target_arch = "wasm32"))]
-async fn load_from_disk<Ps>(paths: Ps, raw_assets: &mut RawAssets) -> Result<()>
+async fn load_from_disk<Ps>(paths: Ps) -> Result<RawAssets>
 where
     Ps: IntoIterator<Item = PathBuf>,
 {
+    let mut raw_assets = RawAssets::new();
     let mut tasks = tokio::task::JoinSet::new();
 
     for path in paths {
@@ -137,11 +147,12 @@ where
         };
     }
 
-    Ok(())
+    Ok(raw_assets)
 }
 
 #[allow(unused_variables)]
-async fn load_urls(paths: HashSet<PathBuf>, raw_assets: &mut RawAssets) -> Result<()> {
+async fn load_urls(paths: HashSet<PathBuf>) -> Result<RawAssets> {
+    let mut raw_assets = RawAssets::new();
     #[cfg(feature = "reqwest")]
     if paths.len() > 0 {
         let mut handles = Vec::new();
@@ -165,9 +176,10 @@ async fn load_urls(paths: HashSet<PathBuf>, raw_assets: &mut RawAssets) -> Resul
     if !paths.is_empty() {
         return Err(Error::FeatureMissing("reqwest".to_string()));
     }
-    Ok(())
+    Ok(raw_assets)
 }
 
+/// Decode and add any data urls in `paths` to `raw_assets`
 fn parse_data_urls(paths: HashSet<PathBuf>, raw_assets: &mut RawAssets) -> Result<()> {
     for path in paths {
         let bytes = parse_data_url(path.to_str().unwrap())?;
