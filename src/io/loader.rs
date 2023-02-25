@@ -59,6 +59,10 @@ pub async fn load_async(paths: &[impl AsRef<Path>]) -> Result<RawAssets> {
     Ok(raw_assets)
 }
 
+///
+/// Load paths, but not any of their dependencies (eg. loading an obj will not
+/// load it's textures in turn)
+///
 #[cfg(target_arch = "wasm32")]
 async fn load_async_single(paths: &[impl AsRef<Path>]) -> Result<RawAssets> {
     let base_path = base_path();
