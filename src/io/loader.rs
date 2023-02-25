@@ -7,6 +7,26 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 ///
+/// Run a future to completion, returning any [`Output`].
+///
+/// NOTE: This creates a tokio runtime to run the future in, so this should
+/// likely be called on some top-level future and not in a loop.
+///
+/// [`Output`]: std::future::Future::Output
+///
+#[cfg(not(target_arch = "wasm32"))]
+fn block_on<F>(f: F) -> F::Output
+where
+    F: std::future::Future,
+{
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(f)
+}
+
+///
 /// Loads all of the resources in the given paths and returns the [RawAssets] resources.
 ///
 /// Supported functionality:
@@ -17,32 +37,7 @@ use std::path::{Path, PathBuf};
 ///
 #[cfg(not(target_arch = "wasm32"))]
 pub fn load(paths: &[impl AsRef<Path>]) -> Result<RawAssets> {
-    let mut raw_assets = load_single(paths)?;
-    let mut dependencies = super::get_dependencies(&raw_assets);
-    while !dependencies.is_empty() {
-        let deps = load_single(&dependencies)?;
-        dependencies = super::get_dependencies(&deps);
-        raw_assets.extend(deps);
-    }
-    Ok(raw_assets)
-}
-
-/// Await a future on the current thread.
-#[cfg(not(target_arch = "wasm32"))]
-fn block_on<F>(f: F) -> F::Output
-where
-    F: std::future::Future,
-{
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(f)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn load_single(paths: &[impl AsRef<Path>]) -> Result<RawAssets> {
-    Ok(block_on(load_async_single(paths))?)
+    block_on(load_async(paths))
 }
 
 ///
@@ -85,6 +80,10 @@ async fn load_async_single(paths: &[impl AsRef<Path>]) -> Result<RawAssets> {
     Ok(raw_assets)
 }
 
+///
+/// Load paths, but not any of their dependencies (eg. loading an obj will not
+/// load it's textures in turn)
+///
 #[cfg(not(target_arch = "wasm32"))]
 async fn load_async_single(paths: &[impl AsRef<Path>]) -> Result<RawAssets> {
     let mut urls = HashSet::new();
