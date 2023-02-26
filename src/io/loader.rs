@@ -227,8 +227,6 @@ where
     };
 
     for url in it {
-        // limit the number of tasks
-        let _permit = my_client.semaphore.acquire().await.unwrap();
         let my_client = my_client.clone();
 
         tasks.spawn(async move {
@@ -238,6 +236,7 @@ where
             })
             .map_err(|e| Error::FailedParsingUrl(e.to_string()))?;
 
+            let _permit = my_client.semaphore.acquire().await.unwrap();
             let response = my_client
                 .client
                 .get(parsed_url)
