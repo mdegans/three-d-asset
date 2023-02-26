@@ -6,6 +6,10 @@ use crate::{io::RawAssets, Error, Result};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+/// User Agent string for three-d-asset
+#[cfg(feature = "reqwest")]
+pub const USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "-", env!("CARGO_PKG_VERSION"));
+
 ///
 /// Run a future to completion, returning any [`Output`].
 ///
@@ -153,13 +157,17 @@ where
     Ok(raw_assets)
 }
 
-#[allow(unused_variables)]
+#[cfg(target_arch = "wasm32")]
 async fn load_urls(paths: HashSet<PathBuf>) -> Result<RawAssets> {
     let mut raw_assets = RawAssets::new();
     #[cfg(feature = "reqwest")]
     if paths.len() > 0 {
         let mut handles = Vec::new();
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .user_agent(USER_AGENT)
+            .build()
+            .unwrap();
         for path in paths {
             let url = reqwest::Url::parse(path.to_str().unwrap())
                 .map_err(|_| Error::FailedParsingUrl(path.to_str().unwrap().to_string()))?;
@@ -179,6 +187,82 @@ async fn load_urls(paths: HashSet<PathBuf>) -> Result<RawAssets> {
     if !paths.is_empty() {
         return Err(Error::FeatureMissing("reqwest".to_string()));
     }
+    Ok(raw_assets)
+}
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "reqwest")))]
+async fn load_urls<Us>(urls: Us) -> Result<RawAssets> {
+    Ok(RawAssets::new())
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "reqwest"))]
+async fn load_urls<Us>(urls: Us) -> Result<RawAssets>
+where
+    Us: IntoIterator<Item = PathBuf>,
+{
+    let mut tasks = tokio::task::JoinSet::new();
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .user_agent(USER_AGENT)
+        .build()
+        .unwrap();
+    let it = urls.into_iter();
+    let mut raw_assets = RawAssets::with_capacity(it.size_hint().1.unwrap_or(0));
+
+    // We need to do this to avoid downloading all the files at once. If n
+    // is 5 or something it's fine, but if it's 500, we need to throttle
+    // our requests or the server won't be able to answer us and the connections
+    // will time out. See:
+    // https://users.rust-lang.org/t/reqwest-http-client-fails-when-too-much-concurrency/55644/2
+    // It might be best for this to be configurable, or there might be another
+    // client we can use with this functionality built in. For now, it's set
+    // to 8 download tasks running concurrently.
+    #[derive(Clone)]
+    struct MyClient {
+        client: reqwest::Client,
+        semaphore: std::sync::Arc<tokio::sync::Semaphore>,
+    }
+    let my_client = MyClient {
+        client: client,
+        semaphore: tokio::sync::Semaphore::new(8).into(),
+    };
+
+    for url in it {
+        // limit the number of tasks
+        let _permit = my_client.semaphore.acquire().await.unwrap();
+        let my_client = my_client.clone();
+
+        tasks.spawn(async move {
+            let parsed_url = reqwest::Url::parse(match url.to_str() {
+                Some(valid_unicode) => valid_unicode,
+                None => return Err(Error::FailedParsingUrl("Bad unicode in url.".into())),
+            })
+            .map_err(|e| Error::FailedParsingUrl(e.to_string()))?;
+
+            let response = my_client
+                .client
+                .get(parsed_url)
+                .send()
+                .await
+                .map_err(|e| Error::FailedLoadingUrl(url.to_string_lossy().into(), e))?;
+
+            let bytes = response
+                .bytes()
+                .await
+                .map_err(|e| Error::FailedLoadingUrl(url.to_string_lossy().into(), e))?
+                .to_vec();
+
+            Ok((url, bytes))
+        });
+    }
+
+    // Iterate over the `res`ults of the tasks as they complete
+    while let Some(Ok(res)) = tasks.join_next().await {
+        match res {
+            Ok((path, bytes)) => raw_assets.insert(path, bytes),
+            Err(e) => return Err(e),
+        };
+    }
+
     Ok(raw_assets)
 }
 
