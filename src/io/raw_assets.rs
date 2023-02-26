@@ -21,6 +21,13 @@ impl RawAssets {
     }
 
     ///
+    /// Constructs a new empty set of raw assets with at least capacity.
+    ///
+    pub fn with_capacity(capacity: usize) -> Self {
+        RawAssets(HashMap::with_capacity(capacity))
+    }
+
+    ///
     /// Remove and returns the raw byte array for the resource at the given path.
     ///
     /// ```
