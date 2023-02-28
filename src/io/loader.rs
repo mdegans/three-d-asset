@@ -134,6 +134,14 @@ where
     let mut tasks = tokio::task::JoinSet::new();
 
     for path in paths {
+        // Note: This will spawn all of the tasks at once (which are cheap, only
+        // 64kb per task), but Tokio will very likely schedule them to run in
+        // sequence in a dedicated thread. This is a good thing since loading
+        // many files from *disk* at the same time will likely hurt performance
+        // due to memory locality issues, especially with spinning disks.
+        // Letting the runtime decide what to do is probably best here as in
+        // the future it might use underlying native async io features of the OS
+        // rather than an IO thread/pool.
         tasks.spawn(async move {
             let bytes = tokio::fs::read(&path)
                 .await
@@ -146,8 +154,8 @@ where
     // Iterate over the `res`ults of the tasks as they complete
     while let Some(Ok(res)) = tasks.join_next().await {
         // We don't care about Some(Err(e)) as this only happens if the join
-        // fails which can only happen if a task panics but that can't happpen
-        // because the task code in the above for loop can't panic.
+        // fails which can only happen if a task doesn't complete but that can't
+        // happpen because the task code in the above for loop can't panic.
         match res {
             Ok((path, bytes)) => raw_assets.insert(path, bytes),
             Err(e) => return Err(e),
