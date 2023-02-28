@@ -82,8 +82,7 @@ async fn load_async_single(paths: &[impl AsRef<Path>]) -> Result<RawAssets> {
             urls.insert(base_path.join(path));
         }
     }
-    let mut raw_assets = RawAssets::new();
-    load_urls(urls, &mut raw_assets).await?;
+    let mut raw_assets = load_urls(urls).await?;
     parse_data_urls(data_urls, &mut raw_assets)?;
     Ok(raw_assets)
 }
@@ -165,17 +164,13 @@ where
     Ok(raw_assets)
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "reqwest"))]
 async fn load_urls(paths: HashSet<PathBuf>) -> Result<RawAssets> {
     let mut raw_assets = RawAssets::new();
-    #[cfg(feature = "reqwest")]
+
     if paths.len() > 0 {
         let mut handles = Vec::new();
-        let client = reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(5))
-            .user_agent(USER_AGENT)
-            .build()
-            .unwrap();
+        let client = reqwest::Client::new();
         for path in paths {
             let url = reqwest::Url::parse(path.to_str().unwrap())
                 .map_err(|_| Error::FailedParsingUrl(path.to_str().unwrap().to_string()))?;
@@ -191,14 +186,15 @@ async fn load_urls(paths: HashSet<PathBuf>) -> Result<RawAssets> {
             raw_assets.insert(path, bytes);
         }
     }
+
+    Ok(raw_assets)
+}
+#[cfg(not(feature = "reqwest"))]
+async fn load_urls(paths: HashSet<PathBuf>) -> Result<RawAssets> {
     #[cfg(not(feature = "reqwest"))]
     if !paths.is_empty() {
         return Err(Error::FeatureMissing("reqwest".to_string()));
     }
-    Ok(raw_assets)
-}
-#[cfg(all(not(target_arch = "wasm32"), not(feature = "reqwest")))]
-async fn load_urls<Us>(urls: Us) -> Result<RawAssets> {
     Ok(RawAssets::new())
 }
 
