@@ -199,58 +199,70 @@ async fn load_urls<Us>(urls: Us) -> Result<RawAssets>
 where
     Us: IntoIterator<Item = PathBuf>,
 {
+    use std::{collections::HashMap, sync::Arc};
+    use tokio::sync::Semaphore;
+
+    // connection limit per host (in the future make this configurable?)
+    const CONN_PER_HOST: usize = 8;
+
     let mut tasks = tokio::task::JoinSet::new();
+    // It might be more flexible to provide the client as an argument to this function
     let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(5))
         .user_agent(USER_AGENT)
         .build()
         .unwrap();
     let it = urls.into_iter();
+    // allocate enough space for the entire iterator
     let mut raw_assets = RawAssets::with_capacity(it.size_hint().1.unwrap_or(0));
+    // A mapping of hosts to semaphores to limit connections. All tasks are
+    // spawned immediately but must wait until a permit is free for a particular
+    // host before the task can actually start downloading.
+    let mut host_connections = HashMap::new();
 
-    // We need to do this to avoid downloading all the files at once. If n
-    // is 5 or something it's fine, but if it's 500, we need to throttle
-    // our requests or the server won't be able to answer us and the connections
-    // will time out. See:
-    // https://users.rust-lang.org/t/reqwest-http-client-fails-when-too-much-concurrency/55644/2
-    // It might be best for this to be configurable, or there might be another
-    // client we can use with this functionality built in. For now, it's set
-    // to 8 download tasks running concurrently.
-    #[derive(Clone)]
-    struct MyClient {
-        client: reqwest::Client,
-        semaphore: std::sync::Arc<tokio::sync::Semaphore>,
-    }
-    let my_client = MyClient {
-        client: client,
-        semaphore: tokio::sync::Semaphore::new(8).into(),
-    };
+    for path in it {
+        // Note: this is not a deep copy or anything. It's just cloning an Arc.
+        // The underlying `client` is reused. We must clone it to move it
+        // (possibly) across threads into the spawned task.
+        let client = client.clone();
 
-    for url in it {
-        let my_client = my_client.clone();
+        let url = reqwest::Url::parse(match path.to_str() {
+            Some(valid_unicode) => valid_unicode,
+            None => return Err(Error::FailedParsingUrl("Bad unicode in url.".into())),
+        })
+        .map_err(|e| Error::FailedParsingUrl(e.to_string()))?;
+
+        // This could technically fail since some valid urls (like `file::`) do
+        // not have a valid hostname. It might be best to detect this scheme and
+        // put their local paths in `local_paths` in `load_async_single`
+        let host = match url.host() {
+            Some(host) => host,
+            None => return Err(Error::FailedParsingUrl("Invalid host.".into())),
+        };
+
+        // Clone our semaphore for this host. We can't aquire here or we await
+        // here and block iteration, which isn't what we want. We must move this
+        // inside the closure below and acquire a permit.
+        let semaphore = host_connections
+            .entry(host.to_owned())
+            .or_insert(Arc::new(Semaphore::new(CONN_PER_HOST)))
+            .to_owned();
 
         tasks.spawn(async move {
-            let parsed_url = reqwest::Url::parse(match url.to_str() {
-                Some(valid_unicode) => valid_unicode,
-                None => return Err(Error::FailedParsingUrl("Bad unicode in url.".into())),
-            })
-            .map_err(|e| Error::FailedParsingUrl(e.to_string()))?;
-
-            let _permit = my_client.semaphore.acquire().await.unwrap();
-            let response = my_client
-                .client
-                .get(parsed_url)
+            let _permit = semaphore.acquire().await.unwrap();
+            let response = client
+                .get(url)
                 .send()
                 .await
-                .map_err(|e| Error::FailedLoadingUrl(url.to_string_lossy().into(), e))?;
+                .map_err(|e| Error::FailedLoadingUrl(path.to_string_lossy().into(), e))?;
 
             let bytes = response
                 .bytes()
                 .await
-                .map_err(|e| Error::FailedLoadingUrl(url.to_string_lossy().into(), e))?
+                .map_err(|e| Error::FailedLoadingUrl(path.to_string_lossy().into(), e))?
                 .to_vec();
 
-            Ok((url, bytes))
+            Ok((path, bytes))
         });
     }
 
