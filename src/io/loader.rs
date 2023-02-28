@@ -223,9 +223,7 @@ where
     let it = urls.into_iter();
     // allocate enough space for the entire iterator
     let mut raw_assets = RawAssets::with_capacity(it.size_hint().1.unwrap_or(0));
-    // A mapping of hosts to semaphores to limit connections. All tasks are
-    // spawned immediately but must wait until a permit is free for a particular
-    // host before the task can actually start downloading.
+    // A mapping of hosts to semaphores to limit connections.
     let mut host_connections = HashMap::new();
 
     for path in it {
@@ -248,14 +246,19 @@ where
             None => return Err(Error::FailedParsingUrl("Invalid host.".into())),
         };
 
-        // Clone our semaphore for this host. We can't aquire here or we await
+        // Clone our semaphore for this host. We can't acquire here or we await
         // here and block iteration, which isn't what we want. We must move this
-        // inside the closure below and acquire a permit.
+        // inside the closure below and acquire a permit inside the spawned task.
         let semaphore = host_connections
             .entry(host.to_owned())
             .or_insert(Arc::new(Semaphore::new(CONN_PER_HOST)))
             .to_owned();
 
+        // NOTE: We must not await inside this for loop (outside this task), or
+        // we block iteration and stop spawning tasks. We want to spawn all
+        // tasks, and only await within *spawned* tasks. This way all urls are
+        // submitted as tasks immediately, although downloads will only happen
+        // if permits are available for a given host.
         tasks.spawn(async move {
             let _permit = semaphore.acquire().await.unwrap();
             let response = client
@@ -270,7 +273,7 @@ where
                 .map_err(|e| Error::FailedLoadingUrl(path.to_string_lossy().into(), e))?
                 .to_vec();
 
-            Ok((path, bytes))
+            Ok((path, bytes)) // _permit is released
         });
     }
 
